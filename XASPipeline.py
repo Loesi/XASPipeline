@@ -1,6 +1,6 @@
 
 from numpy._typing import NDArray
-import argparse, h5py, inspect, logging, pathlib, os, struct, sys, time, yaml
+import argparse, h5py, inspect, logging, pathlib, os, re, struct, sys, time, yaml
 
 import matplotlib.pyplot as plt
 
@@ -11,14 +11,15 @@ import scipy as sp
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from datetime import datetime
-from matplotlib import colormaps
-from matplotlib.widgets import Slider
+from matplotlib import axes, figure, widgets, text, collections, lines
 from multiprocessing.pool import ThreadPool
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from lmfit import Parameters, minimize, report_fit
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.optimize import leastsq
-from typing import Annotated, ClassVar, Union, Literal, Optional, Any, get_origin, get_args, cast
+from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, Any, get_origin, get_args, cast
+
+from customRadioButton import MyRadioButtons
 
 
 def deltaE2k(deltaE):
@@ -115,6 +116,11 @@ class XASData:
     def __post_init__(self):
         self.removeNan()
         self.validate()
+
+    def __getitem__(self, key):
+        assert isinstance(key, slice) | isinstance(key, list)
+        return type(self)(np.copy(self.energies, subok=True), np.copy(self.times[key], subok=True), np.copy(self.absorption[key], subok=True))
+
 
     @classmethod
     def extracter(cls, logger: logging.Logger, directory: pathlib.Path, name: str, mode: str):
@@ -491,7 +497,7 @@ class Preprocessor(Processor):
 class BackgroundModel(BaseModel, ABC):
     _fitted_params: Any = PrivateAttr(None)
     @abstractmethod
-    def fit_transform(self, data: XASData, e_slice: slice,  e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+    def fit_transform(self, data: XASData, e_slice: slice, t_slice: slice | list = slice(None), e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
         pass
 
     @abstractmethod
@@ -522,9 +528,9 @@ class BackgroundModel(BaseModel, ABC):
 
 class Polynomial(BackgroundModel):
     order: int = 3
-    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+    def fit_transform(self, data: XASData, e_slice: slice, t_slice: slice | list = slice(None), e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
         A = np.vander(data.energies, self.order + 1)
-        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[:,e_slice].T)
+        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[t_slice,e_slice].T)
         return np.dot(A, self._fitted_params).T
     
     def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
@@ -533,15 +539,16 @@ class Polynomial(BackgroundModel):
             return np.dot(np.vander(energies, self.order + 1), self._fitted_params).T
         else:
             return np.dot(np.vander(energies, self.order + 1), self._fitted_params[:,spec_idx]).T
+
         
 class Victoreen(BackgroundModel):
     order: int = 3
-    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+    def fit_transform(self, data: XASData, e_slice: slice, t_slice: slice | list = slice(None) , e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
         A = np.column_stack([
             (1E10 * sp.constants.h * sp.constants.c / (sp.constants.e * data.energies)) ** self.order, np.ones(len(data.energies))
         ])
 
-        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[:,e_slice].T)
+        self._fitted_params, _, _, _ = np.linalg.lstsq(A[e_slice], data.absorption[t_slice,e_slice].T)
         return np.dot(A, self._fitted_params).T
     
     def transform(self, energies: npt.NDArray[np.floating[Any]], spec_idx: int | None = None) -> npt.NDArray[np.floating[Any]]:
@@ -560,7 +567,7 @@ class KSpline(BackgroundModel):
     weigth: int = 3
     _e0_idx: Optional[npt.NDArray[np.integer]]
     _e_slice: Optional[slice]
-    def fit_transform(self, data: XASData, e_slice: slice, e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
+    def fit_transform(self, data: XASData, e_slice: slice, t_slice: slice | list = slice(None), e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
         self._e0_idx = e0_idx
         assert self._e0_idx is not None
         self._e_slice = e_slice
@@ -568,7 +575,8 @@ class KSpline(BackgroundModel):
 
         self._fitted_params = []
         fitted = np.zeros(data.absorption.shape)
-        for i in range(len(data.times)):
+        iterator = range(len(data.times[t_slice])) if isinstance(t_slice, slice) else t_slice
+        for i in iterator:
             ks = np.sqrt((data.energies[e_slice] - data.energies[self._e0_idx[i]]) * eV2revA)
             knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
             self._fitted_params.append(sp.interpolate.make_lsq_spline(
@@ -597,6 +605,9 @@ class KSpline(BackgroundModel):
             return fitted
         else:
             return fitted[0]
+        
+preEdgeFitModels = Union[Polynomial, Victoreen]
+postEdgeFitModels = Union[Polynomial, KSpline]
 
 class Normalizer(Preprocessor):
     """
@@ -604,8 +615,8 @@ class Normalizer(Preprocessor):
     Args:
         pre: ClassName and Args of the Fitting model for the PreEdge (Polynomial or Victoreen)
     """
-    pre: Union[Polynomial, Victoreen] = Polynomial(order = 1)
-    post: Union[Polynomial, KSpline] = Polynomial(order = 3)
+    pre: preEdgeFitModels = Polynomial(order = 1)
+    post: postEdgeFitModels = Polynomial(order = 3)
 
     @model_validator(mode="before")
     @classmethod
@@ -638,10 +649,10 @@ class Normalizer(Preprocessor):
             self.data.validate()
 
         e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
-        pre = self.pre.fit_transform(self.data, pre_edge_slice, e0_idx)
+        pre = self.pre.fit_transform(self.data, pre_edge_slice, e0_idx = e0_idx)
         self.data.absorption -= pre
 
-        post = self.post.fit_transform(self.data, post_edge_slice, e0_idx)
+        post = self.post.fit_transform(self.data, post_edge_slice, e0_idx = e0_idx)
         self.data.absorption /= post
 
         rows_with_neg = (post < 0).any(axis=1)
@@ -683,7 +694,7 @@ class Normalizer(Preprocessor):
             plt.axvline(e, ls="dashed", color="grey")
 
         ax_slider = plt.axes((0.2, 0.1, 0.65, 0.03))
-        slider = Slider(ax_slider, 'Timepoint', 0, self.data.times.shape[0]-1, 
+        slider = widgets.Slider(ax_slider, 'Timepoint', 0, self.data.times.shape[0]-1, 
                         valinit=idx0, valfmt='%d')
 
         def update(val):
@@ -1075,11 +1086,10 @@ class XASPipeline:
         self.defineXASParas(XASPara(**xp))
 
         context = {}
-        context_vars = ["path", "sample_name", "beamline", "plot"]
         for conf, val in config.items():
             if conf in inspect.signature(XASPara.__init__).parameters.keys():
                 continue
-            elif conf in context_vars:
+            elif conf in inspect.signature(PipelineContext.__init__).parameters.keys():
                 context[conf] = val
             else:
                 raise ValueError(f"Global configuration parameter '{conf}' with value '{val}' not recognized")
@@ -1142,6 +1152,208 @@ def runPipeline(conf_path: pathlib.Path, cli_context: dict):
     assert XAS.context is not None
     XAS.run(XASData.extracter(logger, XAS.context.path, XAS.context.exp_name, XAS.context.beamline))
 
+def constrainedTextBox(ax: axes.Axes, label: str, initial_value: str ="0.0"):
+    pattern = re.compile(r'^-?\d*\.?\d*$|^-?\.\d*$')
+    allowed_pattern = re.compile(r'^[-.\d]*$')
+    last_valid_value = initial_value
+
+    textbox = widgets.TextBox(ax, label, initial=initial_value)
+    def on_text_change(val):
+        nonlocal last_valid_value
+        
+        if not allowed_pattern.match(val) and val != "":
+            textbox.set_val(last_valid_value)
+            return
+
+        if pattern.match(val):
+            last_valid_value = val
+        elif val != "" and val not in ["-", ".", ""]:
+            textbox.set_val(last_valid_value)
+    textbox.on_text_change(on_text_change)
+    
+    l = ax.get_children()[0]
+    assert isinstance(l, text.Text)
+    l.set_position((0.5,1))
+    l.set_verticalalignment("bottom")
+    l.set_horizontalalignment("center")
+    
+    return textbox
+
+widgetTypes = Union[widgets.RadioButtons]
+class widget_store(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    pre_start: widgets.TextBox
+    pre_stop: widgets.TextBox
+    post_start: widgets.TextBox
+    post_stop: widgets.TextBox
+    Tslider: widgets.Slider
+    preType: widgets.RadioButtons
+    postType: widgets.RadioButtons
+
+    pre_conf: list[widgetTypes] = []
+    post_conf: list[widgetTypes] = []
+
+    def position_labels(self):
+        w = self.preType
+        for w in [self.preType, self.postType]:
+            n_options = len(w.ax.get_children()) - 11
+            for i,p in enumerate(w.ax.get_children()[:n_options]):
+                assert isinstance(p, text.Text)
+                p.set_position(((i+1)/(n_options+1),.5))
+                p.set_verticalalignment("center")
+                p.set_horizontalalignment("left")
+
+            c = w.ax.get_children()[n_options]
+            assert isinstance(c, collections.PathCollection), f"type is {type(c)} not collections.PathCollection"
+            c.set_offsets([[(i+1)/(n_options+1) -0.05, 0.5] for i in range(n_options)])
+            # print(a.get_paths())
+            # print(a.get_offsets())
+        
+    def add_CallBacks(self, updateT: Callable[[Any],None], updateBorder: Callable[[Any], None], updateFit: Callable[[Any], None]):
+        self.Tslider.on_changed(updateT)
+        for w in [self.pre_start, self.pre_stop, self.post_start, self.post_stop]:
+            w.on_submit(updateBorder)
+        for w in [self.preType, self.postType, *self.pre_conf, *self.post_conf]:
+            w.on_clicked(updateFit)
+
+class GUINorm(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    data: XASData
+    para: XASPara
+    pre: preEdgeFitModels = Polynomial(order = 1)
+    post: postEdgeFitModels = Polynomial(order = 3)
+    _widgets: Optional[widget_store] = PrivateAttr(None)
+
+    def interactiveNormalizer(self):
+
+        self._fig, (ax1, ax2) = plt.subplots(1,2,figsize=(12,6))
+        plt.subplots_adjust(top=0.75, bottom=0.05, right=0.965, left=0.035, wspace=0.075)
+
+        idx0 = 0
+        pre0 = list(self.para._pre_edge_range)
+        if pre0[0] is None:
+            pre0[0] = self.data.energies[0]-self.para.edge_pos
+        post0 = list(self.para._post_edge_range)
+        if post0[1] is None:
+            post0[1] = self.data.energies[-1]-self.para.edge_pos
+
+        self._pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
+        self._post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
+
+        self._widgets = widget_store.model_validate({
+            "pre_start": constrainedTextBox(plt.axes((.05, .9, .05, .05)), "Pre Start: ", "%.2f" %pre0[0]),
+            "pre_stop": constrainedTextBox(plt.axes((.15, .9, .05, .05)), "Pre Stop: ", "%.2f" %pre0[1]),
+            "Tslider": widgets.Slider(plt.axes((.3, .9, .4, .05)),'Timepoint', 0, self.data.times.shape[0]-1, valinit=idx0, valfmt='%d'),
+            "post_start": constrainedTextBox(plt.axes((.8, .9, .05, .05)), "Post Start: ", "%.2f" %post0[0]),
+            "post_stop": constrainedTextBox(plt.axes((.9, .9, .05, .05)), "Post Stop: ", "%.2f" %post0[1]),
+            "preType": widgets.RadioButtons(plt.axes((.05, .85, .4, .05)), [m.__name__ for m in get_args(preEdgeFitModels)]),
+            "postType": widgets.RadioButtons(plt.axes((.55, .85, .4, .05)), [m.__name__ for m in get_args(postEdgeFitModels)]),
+        })
+        self._widgets.position_labels()
+
+        mu0, norm, pre0, post0 = self.get_line_data(self._pre_edge_slice, self._post_edge_slice)
+
+        self._data_line, = ax1.plot(self.data.energies, mu0, label=f'mu @ {self.data.times[idx0]}')
+        self._pre_line, = ax1.plot(self.data.energies, pre0, ls="dashed", c="grey")
+        self._post_line, = ax1.plot(self.data.energies, post0 + pre0, ls="dashed", c="grey")
+        ax1.set_xlim(self.data.energies[0], self.data.energies[-1])
+
+        self._norm_line, = ax2.plot(self.data.energies, norm)
+        ax2.axhline(1, ls="dotted", color="grey")
+        ax2.set_xlim(self.data.energies[0], self.data.energies[-1])
+        ax2.set_ylim(0, 1.5)
+        
+        self._widgets.add_CallBacks(self.update_T, self.update_borders, self.update_fit)
+
+        plt.legend()
+        plt.show()
+    
+    def update_T(self, val):
+        assert self._widgets is not None
+        idx = int(self._widgets.Tslider.val)
+
+        mu, norm, pre, post = self.get_line_data(self._pre_edge_slice, self._post_edge_slice)
+
+        self._data_line.set_ydata(mu)
+        self._data_line.set_label(f'mu @ {self.data.times[idx]}')
+        self._pre_line.set_ydata(pre)
+        self._post_line.set_ydata(post + pre)
+        self._norm_line.set_ydata(norm)
+
+        self._fig.canvas.draw_idle()
+    
+    def update_borders(self, val):
+        assert self._widgets is not None
+        self._pre_edge_slice = self.data.energyRange2idx(
+            self.para.edge_pos + float(self._widgets.pre_start.text),
+            self.para.edge_pos + float(self._widgets.pre_stop.text),
+        )
+        self._post_edge_slice = self.data.energyRange2idx(
+            self.para.edge_pos + float(self._widgets.post_start.text),
+            self.para.edge_pos + float(self._widgets.post_stop.text),
+        )
+        self.update_T(None)
+
+    def update_fit(self, val):
+        print(val)
+        pass
+
+    def get_line_data(self, pre_slice, post_slice) -> tuple[
+        npt.NDArray[np.floating[Any]],
+        npt.NDArray[np.floating[Any]],
+        npt.NDArray[np.floating[Any]],
+        npt.NDArray[np.floating[Any]]
+        ]:
+        assert isinstance(self._widgets, widget_store)
+        t_idx = int(self._widgets.Tslider.val)
+        data = self.data[[t_idx]]
+
+        deriv = np.gradient(data.absorption[0,slice(pre_slice.stop, post_slice.start)])
+        e0_idx = np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3)) + pre_slice.stop
+
+        pre = self.pre.fit_transform(data, pre_slice, e0_idx = e0_idx)
+        data.absorption -= pre
+
+        post = self.post.fit_transform(data, post_slice, e0_idx = e0_idx)
+        data.absorption /= post
+        return self.data.absorption[t_idx], data.absorption[0], pre[0], post[0]
+
+    def _e0_idx(self, pre_idx: int, post_idx: int) -> npt.NDArray[np.integer]:
+        energy_slice = slice(pre_idx, post_idx)
+        deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
+        return np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_idx
+    
+def normGUI(conf_path: pathlib.Path, cli_context: dict):
+    XAS = XASPipeline()
+    if not conf_path.is_absolute():
+        conf_path = pathlib.Path(__file__).parent.resolve() / conf_path
+    with open(conf_path) as stream:
+        try:
+            config = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Problem during parsing of {conf_path}: {exc}")
+        
+    config = config.get("global", {})
+
+    xp = {k: v for k, v in config.items() if k in inspect.signature(XASPara.__init__).parameters.keys()}
+
+    context = {}
+    for conf, val in config.items():
+        if conf in inspect.signature(XASPara.__init__).parameters.keys():
+            continue
+        elif conf in PipelineContext.model_fields.keys():
+            context[conf] = val
+        else:
+            raise ValueError(f"Global configuration parameter '{conf}' with value '{val}' not recognized")
+    context.update(cli_context)
+    context = PipelineContext.model_validate(context)
+
+    guiNorm = GUINorm.model_validate({
+        "data": XASData.extracter(logging.Logger("XAS-Pipeline"), context.path, context.exp_name, context.beamline),
+        "para": XASPara(**xp)
+        })
+    guiNorm.interactiveNormalizer()
+
 #region main
 def main():
     argParser = argparse.ArgumentParser(description="XAS-Pipeline")
@@ -1151,10 +1363,14 @@ def main():
     argParser.add_argument("--beamline", type=str, help="Beamline-mode (e.g. Balder, P65_T, P65_F, P65_SSD) to correctly read the data. Can also be provided in the config.")
     argParser.add_argument("--plot", type=bool, help="Overwrite of default Value for Preprocessor plotting (Default: False). Can also be provided in the config.")
     argParser.add_argument("-c", "--config", default="config.yaml", type=str, help="Path of the .yaml file serving as the config")
+    argParser.add_argument("-g", action="store_true", default="false", help="Enter the GUI modus for the Normalizer")
 
     args = argParser.parse_args()
 
-    runPipeline(pathlib.Path(args.config), {k: v for k, v in vars(args).items() if k not in ["config"] and v is not None})
+    if args.g:
+        normGUI(pathlib.Path(args.config), {k: v for k, v in vars(args).items() if k not in ["config", ""] and v is not None})
+    else:
+        runPipeline(pathlib.Path(args.config), {k: v for k, v in vars(args).items() if k not in ["config", ""] and v is not None})
 #endregion
 
 if __name__ == "__main__":
