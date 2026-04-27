@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from lmfit import Parameters, minimize, report_fit
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.optimize import leastsq
-from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, Any, get_origin, get_args, cast
+from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, Type, Any, get_origin, get_args, cast
 
 from customRadioButton import MyRadioButtons
 
@@ -519,6 +519,8 @@ class BackgroundModel(BaseModel, ABC):
             return data
         if not isinstance(data, dict):
             raise ValueError()
+        if len(data) == 0:
+            return data
         if any(key in cls.model_fields.keys() for key in data.keys()):
             return data
         if cls.__name__ not in data.keys():
@@ -565,8 +567,8 @@ class Victoreen(BackgroundModel):
 class KSpline(BackgroundModel):
     order: int = 3
     weigth: int = 3
-    _e0_idx: Optional[npt.NDArray[np.integer]]
-    _e_slice: Optional[slice]
+    _e0_idx: Optional[npt.NDArray[np.integer]] = PrivateAttr(None)
+    _e_slice: Optional[slice] = PrivateAttr(None)
     def fit_transform(self, data: XASData, e_slice: slice, t_slice: slice | list = slice(None), e0_idx: npt.NDArray[np.integer] | None = None) -> npt.NDArray[np.floating[Any]]:
         self._e0_idx = e0_idx
         assert self._e0_idx is not None
@@ -608,6 +610,8 @@ class KSpline(BackgroundModel):
         
 preEdgeFitModels = Union[Polynomial, Victoreen]
 postEdgeFitModels = Union[Polynomial, KSpline]
+PREMODELS: dict[str, Type[preEdgeFitModels]] = {cls.__name__: cls for cls in get_args(preEdgeFitModels)}
+POSTMODELS: dict[str, Type[postEdgeFitModels]] = {cls.__name__: cls for cls in get_args(postEdgeFitModels)}
 
 class Normalizer(Preprocessor):
     """
@@ -1190,8 +1194,8 @@ class widget_store(BaseModel):
     preType: widgets.RadioButtons
     postType: widgets.RadioButtons
 
-    pre_conf: list[widgetTypes] = []
-    post_conf: list[widgetTypes] = []
+    pre_conf: dict[str, widgetTypes] = {}
+    post_conf: dict[str, widgetTypes] = {}
 
     def position_labels(self):
         w = self.preType
@@ -1294,8 +1298,57 @@ class GUINorm(BaseModel):
         )
         self.update_T(None)
 
-    def update_fit(self, val):
-        print(val)
+    def update_model_conf(self, region: Literal["pre", "post"]):
+        assert self._widgets is not None
+
+        for w_val in getattr(self._widgets, region + "_conf").popitem():
+            assert isinstance(w_val, widgetTypes)
+            w_val.ax.remove()
+            w_val.disconnect_events()
+            del w_val
+
+        model = getattr(self, region)
+        assert isinstance(model, BackgroundModel)
+        for attr, info in model.model_fields.items():
+            continue
+
+
+        pass
+
+
+    def update_fit(self, val: str):
+        assert self._widgets is not None
+        pre_model = self._widgets.preType.value_selected
+        post_model = self._widgets.postType.value_selected
+
+        if pre_model != self.pre.__class__.__name__:
+            new_pre = PREMODELS[pre_model].model_validate({})
+            self.pre = new_pre
+            ### update Slider logic
+
+        if post_model != self.post.__class__.__name__:
+            self.post = POSTMODELS[post_model].model_validate({})
+            ### slider update logic
+
+        for w_attr, w_val in self._widgets.pre_conf.items():
+            assert isinstance(w_val, widgets.RadioButtons)
+            try:
+                val_int = int(w_val.value_selected)
+            except:
+                continue
+            if getattr(self.pre, w_attr) != val_int:
+                setattr(self.pre, w_attr, val_int)
+        
+        for w_attr, w_val in self._widgets.post_conf.items():
+            assert isinstance(w_val, widgets.RadioButtons)
+            try:
+                val_int = int(w_val.value_selected)
+            except:
+                continue
+            if getattr(self.post, w_attr) != val_int:
+                setattr(self.post, w_attr, val_int)
+
+        self.update_T(None)
         pass
 
     def get_line_data(self, pre_slice, post_slice) -> tuple[
@@ -1309,7 +1362,7 @@ class GUINorm(BaseModel):
         data = self.data[[t_idx]]
 
         deriv = np.gradient(data.absorption[0,slice(pre_slice.stop, post_slice.start)])
-        e0_idx = np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3)) + pre_slice.stop
+        e0_idx = [np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3)) + pre_slice.stop]
 
         pre = self.pre.fit_transform(data, pre_slice, e0_idx = e0_idx)
         data.absorption -= pre
