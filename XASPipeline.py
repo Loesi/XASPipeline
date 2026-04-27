@@ -1362,7 +1362,7 @@ class GUINorm(BaseModel):
         data = self.data[[t_idx]]
 
         deriv = np.gradient(data.absorption[0,slice(pre_slice.stop, post_slice.start)])
-        e0_idx = [np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3)) + pre_slice.stop]
+        e0_idx = np.ndarray([np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3)) + pre_slice.stop])
 
         pre = self.pre.fit_transform(data, pre_slice, e0_idx = e0_idx)
         data.absorption -= pre
