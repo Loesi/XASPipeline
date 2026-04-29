@@ -1361,8 +1361,8 @@ class GUINorm(BaseModel):
         t_idx = int(self._widgets.Tslider.val)
         data = self.data[[t_idx]]
 
-        deriv = np.gradient(data.absorption[0,slice(pre_slice.stop, post_slice.start)])
-        e0_idx = np.ndarray([np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3)) + pre_slice.stop])
+        deriv = np.gradient(data.absorption[:,slice(pre_slice.stop, post_slice.start)], axis=1)
+        e0_idx = np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + pre_slice.stop
 
         pre = self.pre.fit_transform(data, pre_slice, e0_idx = e0_idx)
         data.absorption -= pre
