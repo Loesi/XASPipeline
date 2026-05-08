@@ -267,7 +267,11 @@ class XASData:
         if not self.normalized:
             raise ValueError(f"absorption data has to be normalized before calling genKspace")
         start_idx = np.searchsorted(self.energies, e0)
-        return deltaE2k(self.energies[start_idx:] - e0), self.absorption[:, start_idx:]    
+        return deltaE2k(self.energies[start_idx:] - e0), self.absorption[:, start_idx:]
+
+    def maskedTime(self, mask: npt.NDArray[np.bool_]):
+        self.absorption = self.absorption[mask]
+        self.times = self.times[mask]
         
     def energyRange2idx(self, low, up) -> slice:        
         if isinstance(low, type(None)) & isinstance(up, type(None)):
@@ -660,11 +664,13 @@ class Normalizer(Preprocessor):
         self.data.absorption /= post
 
         rows_with_neg = (post < 0).any(axis=1)
+        mask = np.invert(rows_with_neg)
         self.logger.info(f"Preprocessor {self.name} removed {np.sum(rows_with_neg)} from {len(self.data.times)} due to negative values in post_line spline")
-        self.data.absorption = self.data.absorption[~rows_with_neg]
-        self.data.times = self.data.times[~rows_with_neg]
-        self.pre.mask(~rows_with_neg)
-        self.post.mask(~rows_with_neg)
+        self.data.maskedTime(mask)
+        # self.data.absorption = self.data.absorption[mask]
+        # self.data.times = self.data.times[mask]
+        self.pre.mask(mask)
+        self.post.mask(mask)
 
         self.data.normalized = True 
         
@@ -744,8 +750,9 @@ class NoiseFilter(Preprocessor):
 
         if np.sum(~mask):
             init_num = len(self.data.times)
-            self.data.absorption = self.data.absorption[mask, :]
-            self.data.times = self.data.times[mask]
+            self.data.maskedTime(mask)
+            # self.data.absorption = self.data.absorption[mask, :]
+            # self.data.times = self.data.times[mask]
             self.logger.info(f"Preprocessor {self.name} removed {np.sum(~mask)} from {init_num}")
 
 class Savgol_filter(Preprocessor):
@@ -1198,9 +1205,8 @@ class widget_store(BaseModel):
     post_conf: dict[str, widgetTypes] = {}
 
     def position_labels(self):
-        w = self.preType
-        for w in [self.preType, self.postType]:
-            n_options = len(w.ax.get_children()) - 11
+        for w, opt in zip([self.preType, self.postType], [preEdgeFitModels, postEdgeFitModels]):
+            n_options = len(get_args(opt))
             for i,p in enumerate(w.ax.get_children()[:n_options]):
                 assert isinstance(p, text.Text)
                 p.set_position(((i+1)/(n_options+1),.5))
@@ -1210,14 +1216,27 @@ class widget_store(BaseModel):
             c = w.ax.get_children()[n_options]
             assert isinstance(c, collections.PathCollection), f"type is {type(c)} not collections.PathCollection"
             c.set_offsets([[(i+1)/(n_options+1) -0.05, 0.5] for i in range(n_options)])
-            # print(a.get_paths())
-            # print(a.get_offsets())
+
+    def position_conf_labels(self):
+        for a in [self.pre_conf, self.post_conf]:
+            for w in a.values():
+                n_options = 3
+                ### using n_options with set offset is vulnarable to injections like legends; scanning for all leading text.Text might be better
+                for i,p in enumerate(w.ax.get_children()[:n_options]):
+                    assert isinstance(p, text.Text), f"element is {type(p)} not text.Text"
+                    p.set_position(((i+1)/(n_options+1),.5))
+                    p.set_verticalalignment("center")
+                    p.set_horizontalalignment("left")
+
+                c = w.ax.get_children()[n_options]
+                assert isinstance(c, collections.PathCollection), f"type is {type(c)} not collections.PathCollection"
+                c.set_offsets([[(i+1)/(n_options+1) -0.05, 0.5] for i in range(n_options)])
         
     def add_CallBacks(self, updateT: Callable[[Any],None], updateBorder: Callable[[Any], None], updateFit: Callable[[Any], None]):
         self.Tslider.on_changed(updateT)
         for w in [self.pre_start, self.pre_stop, self.post_start, self.post_stop]:
             w.on_submit(updateBorder)
-        for w in [self.preType, self.postType, *self.pre_conf, *self.post_conf]:
+        for w in [self.preType, self.postType, *self.pre_conf.values(), *self.post_conf.values()]:
             w.on_clicked(updateFit)
 
 class GUINorm(BaseModel):
@@ -1253,6 +1272,8 @@ class GUINorm(BaseModel):
             "preType": widgets.RadioButtons(plt.axes((.05, .85, .4, .05)), [m.__name__ for m in get_args(preEdgeFitModels)]),
             "postType": widgets.RadioButtons(plt.axes((.55, .85, .4, .05)), [m.__name__ for m in get_args(postEdgeFitModels)]),
         })
+        self.update_model_conf("pre")
+        self.update_model_conf("post")
         self._widgets.position_labels()
 
         mu0, norm, pre0, post0 = self.get_line_data(self._pre_edge_slice, self._post_edge_slice)
@@ -1269,7 +1290,6 @@ class GUINorm(BaseModel):
         
         self._widgets.add_CallBacks(self.update_T, self.update_borders, self.update_fit)
 
-        plt.legend()
         plt.show()
     
     def update_T(self, val):
@@ -1301,19 +1321,33 @@ class GUINorm(BaseModel):
     def update_model_conf(self, region: Literal["pre", "post"]):
         assert self._widgets is not None
 
-        for w_val in getattr(self._widgets, region + "_conf").popitem():
+        model_conf: dict[str, widgetTypes] = getattr(self._widgets, region + "_conf")
+
+        while model_conf:
+            w, w_val = model_conf.popitem()
             assert isinstance(w_val, widgetTypes)
-            w_val.ax.remove()
             w_val.disconnect_events()
+            w_val.ax.remove()
             del w_val
 
         model = getattr(self, region)
         assert isinstance(model, BackgroundModel)
-        for attr, info in model.model_fields.items():
-            continue
-
-
-        pass
+        for i, (attr, info) in enumerate(model.__class__.model_fields.items()):
+            x_pos = .05 if region == "pre" else .55
+            if info.annotation == int:
+                conf_option = ["1","2","3"]
+            else:
+                print("lolololol")
+                print(info)
+                conf_option = ["1","2","3"]
+            active = conf_option.index(str(getattr(model, attr)))
+            ax = plt.axes((x_pos, .80 - .05*i, .4, .05))
+            model_conf[attr] = widgets.RadioButtons(ax, conf_option, active=active)
+            # this is not displayed, i dont know why
+            label = ax.text(0.05, 0.5, attr, va="center", ha="left", visible=True)
+        
+        self._widgets.position_conf_labels()
+        self._widgets.add_CallBacks(self.update_T, self.update_borders, self.update_fit)
 
 
     def update_fit(self, val: str):
@@ -1325,10 +1359,12 @@ class GUINorm(BaseModel):
             new_pre = PREMODELS[pre_model].model_validate({})
             self.pre = new_pre
             ### update Slider logic
+            self.update_model_conf("pre")
 
         if post_model != self.post.__class__.__name__:
             self.post = POSTMODELS[post_model].model_validate({})
             ### slider update logic
+            self.update_model_conf("post")
 
         for w_attr, w_val in self._widgets.pre_conf.items():
             assert isinstance(w_val, widgets.RadioButtons)
