@@ -1098,7 +1098,7 @@ class XASPipeline:
         for conf, val in config.items():
             if conf in inspect.signature(XASPara.__init__).parameters.keys():
                 continue
-            elif conf in inspect.signature(PipelineContext.__init__).parameters.keys():
+            elif conf in PipelineContext.model_fields.keys():
                 context[conf] = val
             else:
                 raise ValueError(f"Global configuration parameter '{conf}' with value '{val}' not recognized")
@@ -1450,7 +1450,7 @@ def main():
     argParser.add_argument("--beamline", type=str, help="Beamline-mode (e.g. Balder, P65_T, P65_F, P65_SSD) to correctly read the data. Can also be provided in the config.")
     argParser.add_argument("--plot", type=bool, help="Overwrite of default Value for Preprocessor plotting (Default: False). Can also be provided in the config.")
     argParser.add_argument("-c", "--config", default="config.yaml", type=str, help="Path of the .yaml file serving as the config")
-    argParser.add_argument("-g", action="store_true", default="false", help="Enter the GUI modus for the Normalizer")
+    argParser.add_argument("-g", action="store_true", default=False, help="Enter the GUI modus for the Normalizer")
 
     args = argParser.parse_args()
 
