@@ -19,8 +19,6 @@ from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.optimize import leastsq
 from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, Type, Any, get_origin, get_args, cast
 
-from customRadioButton import MyRadioButtons
-
 
 def deltaE2k(deltaE):
     return np.sqrt(2 * sp.constants.m_e * sp.constants.eV * deltaE / np.square(sp.constants.hbar)) * 1E-10
