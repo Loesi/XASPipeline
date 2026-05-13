@@ -582,7 +582,7 @@ class KSpline(BackgroundModel):
         iterator = range(len(data.times[t_slice])) if isinstance(t_slice, slice) else t_slice
         for i in iterator:
             ks = np.sqrt((data.energies[e_slice] - data.energies[self._e0_idx[i]]) * eV2revA)
-            knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (3,3), "edge")
+            knots = np.pad(np.linspace(ks[0], ks[-1], int((ks.max() - ks.min())/2)), (self.order,self.order), "edge")
             self._fitted_params.append(sp.interpolate.make_lsq_spline(
                 ks, (data.absorption[i,e_slice] * (ks**self.weigth)),
                 knots, k = self.order
