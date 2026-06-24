@@ -20,6 +20,9 @@ from scipy.optimize import leastsq
 from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, Type, Any, get_origin, get_args, cast
 
 
+type Number = float | int | np.floating | np.integer
+
+
 def deltaE2k(deltaE):
     return np.sqrt(2 * sp.constants.m_e * sp.constants.eV * deltaE / np.square(sp.constants.hbar)) * 1E-10
 
@@ -840,14 +843,24 @@ class Rebinner(Preprocessor):
         self.data.energies = np.array([(steps[i] + steps[i+1]) / 2 for i in range(len(steps)-1)])
 
 class Merger(Preprocessor):
-    mode: Literal['all', 'auto', 'manuel'] = "all"
+    mode: Literal['all', 'auto', 'manuel', 'window'] = "all"
     threshold: float = 0.03
+    window_size: float = 600 # default 10 minute intervals
+    window_start: float = 0 # starting point
     _groups: npt.NDArray[np.integer[Any]] | None = PrivateAttr(default=None)
     _times: npt.NDArray[np.floating[Any]]| None = PrivateAttr(default=None)
 
     def _merge_all(self):
         self.data.absorption = self.data.absorption.mean(axis=0)[np.newaxis, :]
         self.data.times = np.arange(1).astype(np.float64)
+
+    def _merge_window(self):
+        break_times = np.arange(self.window_start, self.data.times[-1], self.window_size)
+        bins_breaks = np.append(np.searchsorted(self.data.times, break_times), -1)
+        print (self.data.absorption.shape)
+        self.data.absorption = np.stack([self.data.absorption[bins_breaks[i]:bins_breaks[i+1]].mean(axis=0) for i in range(len(bins_breaks)-1)], axis=0)
+        print (self.data.absorption.shape)
+        self.data.times = np.arange(len(bins_breaks)-1).astype(np.float64)
 
     def _merge_manuel(self):
         fig, ax = plt.subplots()
@@ -906,17 +919,20 @@ class Merger(Preprocessor):
         match self.mode:
             case "all":
                 return self._merge_all()
+            case "window":
+                return self._merge_window()
             case "manuel":
                 return self._merge_manuel()
             case "auto":
                 return self._merge_auto()
     
     def _plot(self):
+        if self.mode != "auto":
+            return
+        
         assert self._times is not None
         assert self._groups is not None
 
-        if self.mode != "auto":
-            return
         plt.subplots()
         plt.title(f"Preprocessor {self.name}")
         for t,g in zip(self._times, self._groups):
