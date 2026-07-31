@@ -5,3 +5,5 @@
 !.gitignore
 !XASPipeline.py
 !config.yaml
+!pyproject.toml
+!uv.lock
