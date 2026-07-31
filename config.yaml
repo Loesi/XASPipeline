@@ -59,6 +59,9 @@ Merger:
 #     - -1
 #   # name: EdgeLC # overwrite default name of module
 
+EdgePosition:
+  edge_range: [-40, 50]
+
 # # EdgeDiffPlotter
 #   # name: EdgeDiffPlotter # overwrite default name of module
 

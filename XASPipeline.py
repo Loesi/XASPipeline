@@ -96,7 +96,7 @@ class XASPara:
         # self.name: str
 
     @property
-    def pre_edge_range(self) -> tuple[float | None, float]:
+    def pre_edge_range(self) -> Tuple[float | None, float]:
         e1, e2 = self._pre_edge_range
         return (self.edge_pos + e1 if e1 is not None else None, self.edge_pos + e2)
 
@@ -104,6 +104,10 @@ class XASPara:
     def post_edge_range(self) -> tuple[float, float | None]:
         e1, e2 = self._post_edge_range
         return (self.edge_pos + e1, self.edge_pos + e2 if e2 is not None else None)
+
+    @property
+    def edge_range(self) -> tuple[float, float]:
+        return (self.edge_pos + self._pre_edge_range[1], self.edge_pos + self._post_edge_range[0])
 
 @dataclass
 class XASData:
@@ -272,18 +276,20 @@ class XASData:
         self.absorption = self.absorption[mask]
         self.times = self.times[mask]
         
-    def energyRange2idx(self, low, up) -> slice:        
-        if isinstance(low, type(None)) & isinstance(up, type(None)):
-            return slice(0, None)
-        elif isinstance(low, type(None)):
-            return slice(0, np.argmax(self.energies > up), None)
-        elif isinstance(up, type(None)):
-            return slice(np.argmax(self.energies > low), None)
+    def energyRange2idx(self, low: Union[float, None], up: Union[float, None]) -> slice:
+        if low is None and up is None:
+            return slice(0, -1)
+        elif low is None:
+            assert up is not None
+            return slice(None, np.searchsorted(self.energies, up))
+        elif up is None:
+            assert low is not None
+            return slice(np.searchsorted(self.energies, low), None)
         
         if low > up:
             raise ValueError("energyRange2idx requires the low value to be smaller than the up value")
         
-        return slice(np.argmax(self.energies > low), np.argmax(self.energies > up) -1)
+        return slice(np.searchsorted(self.energies, low), np.searchsorted(self.energies, up))
 #endregion
 
 #region XASReference
@@ -644,19 +650,13 @@ class Normalizer(Preprocessor):
         pre_edge_slice = self.data.energyRange2idx(*self.para.pre_edge_range)
         post_edge_slice = self.data.energyRange2idx(*self.para.post_edge_range)
 
-        if self.para.pre_edge_range[0] is not None and pre_edge_slice.start != 0:
-            start_idx = np.searchsorted(self.data.energies, self.para.pre_edge_range[0]) 
-            self.data.energies = self.data.energies[start_idx:]
-            self.data.absorption = self.data.absorption[:,start_idx:]
+        if (pre_edge_slice.start != None) and (post_edge_slice.stop != None):
+            energy_slice = slice(pre_edge_slice.start, post_edge_slice.stop)
+            self.data.energies = self.data.energies[energy_slice]
+            self.data.absorption = self.data.absorption[:,energy_slice]
             self.data.validate()
-            pre_edge_slice = slice(pre_edge_slice.start-start_idx, pre_edge_slice.stop-start_idx)
-            post_edge_slice = slice(post_edge_slice.start-start_idx, post_edge_slice.stop-start_idx)
-        
-        if self.para.post_edge_range[1] is not None and post_edge_slice.stop != len(self.data.energies):
-            stop_idx = np.searchsorted(self.data.energies, self.para.post_edge_range[1], side="right")
-            self.data.energies = self.data.energies[:stop_idx]
-            self.data.absorption = self.data.absorption[:,:stop_idx]
-            self.data.validate()
+            pre_edge_slice = slice(0, pre_edge_slice.stop-energy_slice.start)
+            post_edge_slice = slice(post_edge_slice.start-energy_slice.start, -1)
 
         e0_idx = self._e0_idx(pre_edge_slice.stop, post_edge_slice.start)
         pre = self.pre.fit_transform(self.data, pre_edge_slice, e0_idx = e0_idx)
@@ -808,8 +808,8 @@ class Rebinner(Preprocessor):
     def _boxcar_average(self, e_start, e_end):
         i_start = np.searchsorted(self.data.energies, e_start)
         i_end = np.searchsorted(self.data.energies, e_end) - 1
-        if i_start >= i_end:
-            raise ValueError(f"no data in bin [{e_start}, {e_end}]") 
+        # if i_start >= i_end:
+        #     raise ValueError(f"no data in bin [{e_start}, {e_end}]") 
         
         t_start = (e_start - self.data.energies[i_start-1]) / (self.data.energies[i_start] - self.data.energies[i_start-1])
         t_end = (e_end - self.data.energies[i_end]) / (self.data.energies[i_end+1] - self.data.energies[i_end])
@@ -855,9 +855,7 @@ class Merger(Preprocessor):
     def _merge_window(self):
         break_times = np.arange(self.window_start, self.data.times[-1], self.window_size)
         bins_breaks = np.append(np.searchsorted(self.data.times, break_times), -1)
-        print (self.data.absorption.shape)
         self.data.absorption = np.stack([self.data.absorption[bins_breaks[i]:bins_breaks[i+1]].mean(axis=0) for i in range(len(bins_breaks)-1)], axis=0)
-        print (self.data.absorption.shape)
         self.data.times = np.arange(len(bins_breaks)-1).astype(np.float64)
 
     def _merge_manuel(self):
@@ -952,7 +950,7 @@ class Analyzer(Processor):
 
 class SVDDecompositor(Analyzer):
     mode: Literal['threshold', 'n_comp'] = "threshold"
-    threshold: float | None = 0
+    threshold: float = 0
     n_comp: int | None = None
     def _analyse(self):
         U, S, Vh = np.linalg.svd(self.data.absorption, full_matrices=False)
@@ -1070,6 +1068,47 @@ class Plotter(Analyzer):
         for e in (val for val in self.para.post_edge_range if val is not None):
             axul.axvline(e, ls="dashed", color="grey")
 
+class InteractivePlotter(Analyzer):
+    def _analyse(self):
+        self._fig, ax = plt.subplots(1,figsize=(8,4))
+        plt.subplots_adjust(top=0.75, bottom=0.05, right=0.965, left=0.035, wspace=0.075)
+
+        idx0=0
+        self._der = "Normalized"
+        self._t_slider = widgets.Slider(plt.axes((.05, .9, .4, .05)),'Timepoint', 0, self.data.times.shape[0]-1, valinit=idx0, valfmt='%d')
+        self._der_radio = widgets.RadioButtons(plt.axes((.55, .9, .4, .05)), ["Normalized", "Derivative", "2nd Derivative"])
+
+        self._line= ax.plot(self.data.energies, self.data.absorption[idx0])[0]
+        ax.set_xlim(self.data.energies[0], self.data.energies[-1])
+        ax.set_ylim(0, 1.5)
+
+        self._t_slider.on_changed(self.update)
+        self._der_radio.on_clicked(self.updateDer)
+
+        plt.show()
+
+    def updateDer(self,val):
+        self._der = val
+        self.update(0)
+    
+    def update(self, val):
+        idx = int(self._t_slider.val)
+        der = self._der
+
+        match self._der:
+            case "Normalized":
+                y = self.data.absorption[idx]
+            case "Derivative":
+                y = np.gradient(self.data.absorption[idx])  / np.gradient(self.data.energies)
+            case "2nd Derivative":
+                y = np.gradient(self.data.absorption[idx])  / np.gradient(self.data.energies)
+                y = np.gradient(y)  / np.gradient(self.data.energies)
+            case _:
+                raise ValueError("lololol")
+
+        self._line.set_ydata(y)
+        self._fig.canvas.draw_idle()
+
 class EdgeDiffPlotter(Analyzer):
     def _analyse(self):
         X, Y = np.meshgrid(self.data.energies, self.data.times)
@@ -1081,21 +1120,26 @@ class EdgeDiffPlotter(Analyzer):
         plt.axvline(self.para.edge_pos, color="black", ls="dotted")
 
 class EdgePosition(Analyzer):
-    edge_range: tuple[float, float] = (-40, 50)
+    edge_range: Optional[Tuple[float, float]] = None
+    smoothing: float = 1
     
     def model_post_init(self, context):
         super().model_post_init(context)
 
         print("IDK ob ich hier redefinition der Edge zulassen sollte. IDK ob ich automatische erkennung aktivieren sollte")
         if self.edge_range is None:
-            self.edge_range = (self.para._pre_edge_range[1], self.para._post_edge_range[0])
+            self.edge_range = self.para.edge_range
 
     def _analyse(self) -> None:
-        energy_slice = slice(self.edge_range[0], self.edge_range[1])
+        assert self.edge_range is not None
+        energy_slice = self.data.energyRange2idx(*self.edge_range)
         deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
-        edge_pos = np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + self.edge_range[0]
+        deltaE = np.mean(np.diff(self.data.energies[energy_slice]))
+        edge_pos = self.data.energies[np.argmax(sp.ndimage.gaussian_filter1d(deriv, max(1, self.smoothing / deltaE), axis=1), axis=1) + energy_slice.start]
         
         # TODO: still needs export logic
+        fig, ax = plt.subplots(figsize=(8,4), dpi = 200)
+        ax.plot(edge_pos, self.data.times)
         pass
 
 class Exporter(Analyzer):
