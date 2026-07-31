@@ -1,9 +1,7 @@
 
-from numpy._typing import NDArray
 import argparse, h5py, inspect, logging, pathlib, os, re, struct, sys, time, yaml
 
 import matplotlib.pyplot as plt
-
 import numpy as np
 import numpy.typing as npt
 import scipy as sp
@@ -17,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 from lmfit import Parameters, minimize, report_fit
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.optimize import leastsq
-from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, Type, Any, get_origin, get_args, cast
+from typing import Annotated, ClassVar, Callable, Union, Literal, Optional, List, Tuple, Type, Any, get_origin, get_args, cast
 
 
 type Number = float | int | np.floating | np.integer
@@ -1135,8 +1133,7 @@ class XASPipeline:
     context: PipelineContext | None = None
 
     def __init__(self):
-        self._PreProcessors: list[Preprocessor] = []
-        self._Analyzers: list[Analyzer] = []
+        self._Processors: List[Processor] = []
 
     def _load_global_conf(self, config: dict) -> dict[Any, Any]:
         xp = {k: v for k, v in config.items() if k in inspect.signature(XASPara.__init__).parameters.keys()}
@@ -1161,19 +1158,14 @@ class XASPipeline:
         for cls_name, cls_config in config.items():
             conf = cls_config or {}
             if cls_name in PREPROCESSORS:
-                self._PreProcessors.append(PREPROCESSORS[cls_name].with_context(conf, self.context))
+                self._Processors.append(PREPROCESSORS[cls_name].with_context(conf, self.context))
             elif cls_name in ANALYZERS:
-                self._Analyzers.append(ANALYZERS[cls_name].with_context(conf, self.context))
+                self._Processors.append(ANALYZERS[cls_name].with_context(conf, self.context))
 
-    def addPreProcessor(self, p: Preprocessor):
-        if not isinstance(p, Preprocessor):
-            raise ValueError(f"processor has to be of type {Preprocessor} not {type(p)}")
-        self._PreProcessors.append(p)
-
-    def addAnalyzer(self, a:Analyzer):
-        if not isinstance(a, Analyzer):
-            raise ValueError(f"processor has to be of type {Analyzer} not {type(a)}")
-        self._Analyzers.append(a)
+    def addProcessor(self, p: Processor):
+        if not isinstance(p, Processor):
+            raise ValueError(f"processor has inherit {Analyzer}")
+        self._Processors.append(p)
 
     def defineXASParas(self, paras: XASPara):
         Processor.para = paras
@@ -1181,11 +1173,14 @@ class XASPipeline:
     def run(self, data: XASData):
         self.logger.info("Starting Pipeline Execution...")
 
-        for p in self._PreProcessors:
-            data = p.transform(data)
+        for p in self._Processors:
+            if isinstance(p, Preprocessor):
+                data = p.transform(data)
+            elif isinstance(p, Analyzer):
+                p.analyse(data)
+            else:
+                raise ValueError(f"Processor of type {type(p)} not recognized")
 
-        for a in self._Analyzers:
-            a.analyse(data)
         plt.show()
 #endregion
 
