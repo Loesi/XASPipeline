@@ -1082,6 +1082,24 @@ class EdgeDiffPlotter(Analyzer):
         plt.xlim(self.para.pre_edge_range[1], self.para.post_edge_range[0])
         plt.axvline(self.para.edge_pos, color="black", ls="dotted")
 
+class EdgePosition(Analyzer):
+    edge_range: tuple[float, float] = (-40, 50)
+    
+    def model_post_init(self, context):
+        super().model_post_init(context)
+
+        print("IDK ob ich hier redefinition der Edge zulassen sollte. IDK ob ich automatische erkennung aktivieren sollte")
+        if self.edge_range is None:
+            self.edge_range = (self.para._pre_edge_range[1], self.para._post_edge_range[0])
+
+    def _analyse(self) -> None:
+        energy_slice = slice(self.edge_range[0], self.edge_range[1])
+        deriv = np.gradient(self.data.absorption[:, energy_slice], axis = 1) / np.gradient(self.data.energies[energy_slice])
+        edge_pos = np.argmax(sp.ndimage.gaussian_filter1d(deriv, 3, axis=1), axis=1) + self.edge_range[0]
+        
+        # TODO: still needs export logic
+        pass
+
 class Exporter(Analyzer):
     """
     Exports the data to a csv file.
