@@ -1020,7 +1020,7 @@ class EdgeLC(Analyzer):
 
 class Plotter(Analyzer):
     diff: bool = True
-    ref: XASRef = XASRef(name="first-spec", source_idx=0)
+    ref: XASRef = XASRef(name="first-spec", source_idx=0, color="black")
     k_order: int = 2
     def _analyse(self):
         self.ref.pull_data(self.data.absorption)
@@ -1037,13 +1037,15 @@ class Plotter(Analyzer):
 
         for i, spectra in enumerate(self.data.absorption[::step, :]):
             axul.plot(self.data.energies, spectra, label=f"{self.data.times[step*i]:.0f}")
+        if self.ref.source_idx is None:
+            self.ref.resample(self.data.energies)
+            axul.plot(self.data.energies, self.ref.mu, color=self.ref.color, lw=2)
         axul.legend(frameon=False, loc="lower right", ncols=2)
         axul.set_xlim(*self.data.energies[[0, -1]])
 
         X, Y = np.meshgrid(self.data.energies, self.data.times)
         if self.diff:
-            mean = np.mean(self.data.absorption, axis=0)
-            axur.pcolormesh(X, Y, self.data.absorption-mean, cmap="plasma", shading="auto")
+            axur.pcolormesh(X, Y, self.data.absorption-self.ref.mu, cmap="plasma", shading="auto")
         else:
             axur.pcolormesh(X, Y, self.data.absorption, cmap="plasma", shading="auto")
 
@@ -1052,13 +1054,19 @@ class Plotter(Analyzer):
             k, k_abs = self.data.genKspace(self.para.edge_pos)
             for i, spectra in enumerate(k_abs[::step, :]):
                 axll.plot(k, (spectra - 1) * k**self.k_order)
+            if self.ref.source_idx is None:
+                start_idx = np.searchsorted(self.data.energies, self.para.edge_pos)
+                k = deltaE2k(self.data.energies[start_idx:] - self.para.edge_pos)
+                chi_k = (self.ref.mu[start_idx:] - 1) * k**self.k_order
+                axll.plot(k,chi_k, color=self.ref.color)
             axll.axhline(0, ls="dotted", c="black")
 
             X, Y = np.meshgrid(k, self.data.times)
             k_scal = k**self.k_order
             if self.diff:
-                mean = np.mean(k_abs * k_scal, axis=0)
-                axlr.pcolormesh(X, Y, k_abs * k_scal - mean, cmap="plasma", shading="auto")
+                start_idx = np.searchsorted(self.data.energies, self.para.edge_pos)
+                chi_k = (self.ref.mu[start_idx:] - 1) * k_scal
+                axlr.pcolormesh(X, Y, (k_abs-1) * k_scal - chi_k, cmap="plasma", shading="auto")
             else:
                 axlr.pcolormesh(X, Y, (k_abs-1) * k_scal, cmap="plasma", shading="auto")
 
@@ -1200,6 +1208,7 @@ class XASPipeline:
         self.context = PipelineContext.model_validate(context)
 
         for cls_name, cls_config in config.items():
+            cls_name = cls_name.rstrip('1234567890')
             conf = cls_config or {}
             if cls_name in PREPROCESSORS:
                 self._Processors.append(PREPROCESSORS[cls_name].with_context(conf, self.context))
